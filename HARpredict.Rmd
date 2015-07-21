@@ -1,0 +1,117 @@
+---
+title: "Human Activity Recognition"
+author: "Katelyn Billings"
+date: "July, 2015"
+output: html_document
+---
+
+###Project Description
+
+The goal of this project is to use accelerometer data from Ugulino et al. to identify the manner in which 6 participants performed barbell lifts. This report will describe how the model was generated, how cross-validation was applied and the expected out of sample error. 
+
+```{r message=FALSE, echo=FALSE, warning=FALSE}
+library(caret)
+library(ggplot2)
+library(doMC)
+registerDoMC(cores = 2)
+```
+
+###Getting and Cleaning Data
+
+The data is first downloaded if it is not in the working directory and then the appropriate csv file is read and stored as the training and testing data sets.
+
+```{r}
+if(!file.exists("./training")){
+  fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+  download.file(fileUrl, destfile = "./training", method = "curl")     
+}
+if(!file.exists("./testing")){
+  fileUrl <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+  download.file(fileUrl, destfile = "./testing", method = "curl")
+}
+
+training <- read.csv("./training", na.strings = c("", "NA", "#DIV/0!"))
+testing <- read.csv("./testing", na.strings = c("", "NA", "#DIV/0!"))
+```
+
+From the data set, we are going to create a validation set for future cross-validation efforts in order to get an estimate of the out of sample error rate. 
+
+```{r}
+set.seed(71515)
+inTrain <- createDataPartition(training$classe, p = 3/4)[[1]]
+validation <- training[-inTrain, ]
+training <- training[inTrain, ]
+```
+
+At the onset, we will remove any variables that are not accelerometer measurements such that our model relies only on measured data and not any generated metadata. This treatment results in the removal of the first 7 variables (X, user_name, raw_timestamp_part_1, raw_timestamp_part_2, cvtd_timestamp, new_window, num_window).
+
+```{r}
+training <- training[, -c(1:7)]
+```
+
+A quick glance at the remaining data indicates that there are a significant number of variables that contain predominantly NA values, to the extent that imputation would be unreasonable. A histogram of the % NA indicates that the variables break down into two categories: <5% NA and >95% NA. In order to avoid problems with our model generation, we will remove the variables that contain >95% NA values. If the results from our model are poor, this decision may need to be revisited.
+
+```{r fig.height = 3, fig.width = 6, fig.pos = "H"}
+frac_NA <- apply(training, 2, function(x) sum(is.na(x))/nrow(training))
+qplot(frac_NA, geom = "histogram", binwidth = 0.05) + labs(title = "Fraction Missing Data")
+missing <- frac_NA > 0.95
+complete_training <- training[, !missing]
+```
+
+It is also prudent to remove any near zero variance variables as these likely won't be good predictors due to their lack of variability. Variables that can be derived from a linear combination of other variables should also be removed as they are essentially redundant. However, we can see that our remaining dataset does not contain any nzv covariates and has no linear dependencies. 
+
+```{r}
+nzv <- nearZeroVar(complete_training, saveMetrics = TRUE)
+sum(nzv$nzv)
+
+comboInfo <- findLinearCombos(complete_training[, -53])
+comboInfo$remove
+```
+
+###Model Selection
+
+Given that the classification of exercise type most likely depends on the interaction between acceleration variables, we will build a simple classification tree as our first model to get a feel for the data and then evaluate the model against our validation set in order to establish an out of sample error rate. 
+
+```{r warning=FALSE, message=FALSE, cache=TRUE}
+modFit_rpart <- train(classe ~ ., data = complete_training, method = "rpart")
+modFit_rpart$results[1,2]
+predict_rpart <- predict(modFit_rpart, validation)
+cm_rpart <- confusionMatrix(validation$classe, predict_rpart)
+cm_rpart$table
+cm_rpart$overall["Accuracy"]
+```
+
+While the model took relatively little computation time, we can see that it has a `r round(modFit_rpart$results[1,2]*100, 2)`% in sample accuracy, representing the maximum accuracy possible for an outside data set. Following cross-validation with our validation set, we see a high out of sample error rate with an accuracy of only `r round(cm_rpart$overall["Accuracy"]*100, 2)`% on our validation set. The accuracy rate is lower with the validation set due to overfitting of the data to the training set. 
+
+A random forest will be used to expand upon our initial model and hopefully improve the overall accuracy. The random forest will also get evaluated against the validation set.
+
+```{r warning = FALSE, message=FALSE, cache=TRUE}
+modFit_rf <- train(classe ~ ., data = complete_training, method = "rf")
+modFit_rf
+predict_rf <- predict(modFit_rf, validation)
+cm_rf <- confusionMatrix(validation$classe, predict_rf)
+cm_rf$table
+cm_rf$overall["Accuracy"]
+```
+
+This model is computationally more taxing but it does a much better job at predicting the correct exercise classification. Cross-validation is not necessary for random forests in order to get an unbiased estimate of the accuracy of the model as it is estimated during the course of the model generation. However, application of the random forest model to our validation set results in an accuracy of `r round(cm_rf$overall["Accuracy"]*100, 2)`%. 
+
+Satisfied with the accuracy of this model, the model was applied to the test set where it correctly predicted 20/20 exercise classes.
+
+```{r eval = FALSE}
+answers <- predict(modFit_rf, testing)
+
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(answers)
+```
+
+###Conclusion
+
+From a training set of 14k+ observations with 52 predictors and one outcome, a random forest was generated which was able to predict the type of exercise performed in a validation and test set with a high degree of accuracy. 
